@@ -6,7 +6,7 @@
 #    if not, register one
 #  see if we have a scaling policy
 #    if not, register one
-
+declare -a table_array
 
 usage()
 {
@@ -14,6 +14,7 @@ usage()
   exit 1
 }
 
+# Sees if a role exists in IAM
 role_exists()
 {
   role_name=$1
@@ -22,8 +23,17 @@ role_exists()
   if [ -z "${role_arn}" ]; then
     echo "false"
   else
-    echo "true"
+    echo "${role_arn}"
   fi
+}
+
+# Populates the global array of tables matching our prefix filter
+list_tables_with_filter()
+{
+  prefix=$1
+
+  table_list_str=$(aws dynamodb list-tables --query "TableNames[?starts_with(@,\`${prefix}\`) == \`true\`]" --output text)
+  IFS='	' read -r -a table_array <<< "$table_list_str"
 }
 
 scalable_target_exists()
@@ -70,8 +80,18 @@ if [ -z "${rolename}" ] || [ -z "${prefix}" ]; then
 fi
 
 # Main logic
-if [[ "$(role_exists ${rolename})" == "true" ]]; then
+role_arn=$(role_exists ${rolename})
+
+if [[ "${role_arn}" != "false" ]]; then
   echo "DynamoDB autoscaling role found OK"
+
+  list_tables_with_filter ${prefix}
+
+  for table_name in "${table_array[@]}"
+  do
+    echo "table found $table_name"
+  done
+
 else
   echo "DynamoDB autoscaling role not found - create one. See https://goo.gl/JVmkGS"
 fi
