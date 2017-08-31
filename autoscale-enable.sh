@@ -1,12 +1,13 @@
-#!/usr/local/bin/bash -x
+#!/usr/local/bin/bash
 
-#get list of tables by prefix
-#for each table
-#  see if we have a scalable target
-#    if not, register one
-#  see if we have a scaling policy
-#    if not, register one
 declare -a table_array
+
+# constants
+scaleable_write_dimension="dynamodb:table:WriteCapacityUnits"
+scaleable_read_dimension="dynamodb:table:ReadCapacityUnits"
+write_metric_type="DynamoDBWriteCapacityUtilization"
+read_metric_type="DynamoDBReadCapacityUtilization"
+
 
 usage()
 {
@@ -18,7 +19,11 @@ usage()
 role_exists()
 {
   role_name=$1
-  role_arn=$(aws iam get-role --role-name ${role_name} --query "Role.Arn" --output text)
+
+  role_arn=$(aws iam get-role \
+                 --role-name ${role_name} \
+                 --query "Role.Arn" \
+                 --output text)
 
   if [ -z "${role_arn}" ]; then
     echo "false"
@@ -32,28 +37,111 @@ list_tables_with_filter()
 {
   prefix=$1
 
-  table_list_str=$(aws dynamodb list-tables --query "TableNames[?starts_with(@,\`${prefix}\`) == \`true\`]" --output text)
+  # get the table list and use JMESPath to filter it
+  table_list_str=$(aws dynamodb list-tables \
+                      --query "TableNames[?starts_with(@,\`${prefix}\`) == \`true\`]" \
+                      --output text)
+  # This takes the returned data (which is space seperated) and puts it into an array
   IFS='	' read -r -a table_array <<< "$table_list_str"
 }
 
 scalable_target_exists()
 {
-  echo "checking if scalable target exists"
+  table_name=$1
+  scalable_dimension=$2
+
+  scalable_target=$(aws application-autoscaling describe-scalable-targets \
+                        --service-namespace dynamodb \
+                        --resource-id "table/${table_name}" \
+                        --query "ScalableTargets[?contains(ScalableDimension,\`${scalable_dimension}\`) == \`true\`]" \
+                        --output text)
+
+  if [ -z "${scalable_target}" ]; then
+    echo "false"
+  else
+    echo "true"
+  fi
 }
 
 register_scalable_target()
 {
-  echo "registering scalable target"
+  table_name=$1
+  scalable_dimension=$2
+  role_arn=$3
+
+  aws application-autoscaling register-scalable-target \
+    --service-namespace dynamodb \
+    --resource-id "table/${table_name}" \
+    --scalable-dimension "${scalable_dimension}" \
+    --min-capacity 10 \
+    --max-capacity 40000 \
+    --role-arn ${role_arn}
+
+  status=$?
+
+  if [ ${status} -eq 0 ]; then
+    echo "true"
+  else
+    echo "false"
+  fi
 }
 
 scaling_policy_exists()
 {
-  echo "checking if policy exists"
+  table_name=$1
+  metric_type=$2
+
+  policy_name=$(get_policy_name $table_name $metric_type)
+
+  scaling_policy=$(aws application-autoscaling describe-scaling-policies \
+                      --service-namespace dynamodb \
+                      --resource-id "table/${table_name}" \
+                      --policy-name "${policy_name}" \
+                      --output text)
+
+  if [ -z "${scaling_policy}" ]; then
+    echo "false"
+  else
+    echo "true"
+  fi
 }
 
 register_scaling_policy()
 {
-  echo "registering policy"
+  table_name=$1
+  metric_type=$2
+  scalable_dimension=$3
+
+scaling_policy=$(cat <<  EOF
+{"PredefinedMetricSpecification":{"PredefinedMetricType": "${metric_type}"},"TargetValue": 50.0}
+EOF
+)
+
+  policy_name=$(get_policy_name $table_name $metric_type)
+
+  aws application-autoscaling put-scaling-policy \
+    --service-namespace dynamodb \
+    --resource-id "table/${table_name}" \
+    --scalable-dimension "${scalable_dimension}" \
+    --policy-name "${policy_name}" \
+    --policy-type "TargetTrackingScaling" \
+    --target-tracking-scaling-policy-configuration "${scaling_policy}" > /dev/null
+
+  status=$?
+
+  if [ ${status} -eq 0 ]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
+get_policy_name()
+{
+  table_name=$1
+  policy_type=$2
+
+  echo "${policy_type}:table/${table_name}"
 }
 
 # ======================
@@ -89,9 +177,56 @@ if [[ "${role_arn}" != "false" ]]; then
 
   for table_name in "${table_array[@]}"
   do
-    echo "table found $table_name"
-  done
+    echo -n "checking for scalable target (read throughput) for ${table_name} ..."
+    if [[ "$(scalable_target_exists ${table_name} ${scaleable_read_dimension})" == "true" ]]; then
+      echo "FOUND"
+    else
+      echo -n "CREATING...."
+      if [[ "$(register_scalable_target ${table_name} ${scaleable_read_dimension} ${role_arn})" == "true" ]]; then
+        echo "DONE"
+      else
+        echo "ERROR"
+      fi
+    fi
 
+    echo -n "checking for scalable target (write throughput) for ${table_name} ..."
+    if [[ "$(scalable_target_exists ${table_name} ${scaleable_write_dimension})" == "true" ]]; then
+      echo "FOUND"
+    else
+      echo -n "CREATING..."
+      if [[ "$(register_scalable_target ${table_name} ${scaleable_write_dimension} ${role_arn})" == "true" ]]; then
+        echo "DONE"
+      else
+        echo "ERROR"
+      fi
+    fi
+
+    # Once we have the scalable targets, we can see if the scaling policies exist
+    echo -n "checking for scaling policy (read throughput) for ${table_name} ..."
+    if [[ "$(scaling_policy_exists ${table_name} ${read_metric_type})" == "true" ]]; then
+      echo "FOUND"
+    else
+      echo -n "CREATING..."
+      if [[ "$(register_scaling_policy ${table_name} ${read_metric_type} ${scaleable_read_dimension})" == "true" ]]; then
+        echo "DONE"
+      else
+        echo "ERROR"
+      fi
+    fi
+
+    # Once we have the scalable targets, we can see if the scaling policies exist
+    echo -n "checking for scaling policy (write throughput) for ${table_name} ..."
+    if [[ "$(scaling_policy_exists ${table_name} ${write_metric_type})" == "true" ]]; then
+      echo "FOUND"
+    else
+      echo -n "CREATING..."
+      if [[ "$(register_scaling_policy ${table_name} ${write_metric_type} ${scaleable_write_dimension})" == "true" ]]; then
+        echo "DONE"
+      else
+        echo "ERROR"
+      fi
+    fi
+  done
 else
   echo "DynamoDB autoscaling role not found - create one. See https://goo.gl/JVmkGS"
 fi
