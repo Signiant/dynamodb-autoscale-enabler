@@ -11,7 +11,7 @@ read_metric_type="DynamoDBReadCapacityUtilization"
 
 usage()
 {
-  echo "Usage: $0 [-a <role name>] [-p <table prefix>]" 1>&2
+  echo "Usage: $0 [-a <role name>] [-p <table prefix>] [-m <min throughput>] [-x <max throughput>]" 1>&2
   exit 1
 }
 
@@ -68,13 +68,15 @@ register_scalable_target()
   table_name=$1
   scalable_dimension=$2
   role_arn=$3
+  min_tput=$4
+  max_tput=$5
 
   aws application-autoscaling register-scalable-target \
     --service-namespace dynamodb \
     --resource-id "table/${table_name}" \
     --scalable-dimension "${scalable_dimension}" \
-    --min-capacity 10 \
-    --max-capacity 40000 \
+    --min-capacity ${min_tput} \
+    --max-capacity ${max_tput} \
     --role-arn ${role_arn}
 
   status=$?
@@ -148,13 +150,19 @@ get_policy_name()
 # ====== MAIN
 # ======================
 
-while getopts ":r:p:" o; do
+while getopts ":r:p:m:x:" o; do
     case "${o}" in
         r)
             rolename=${OPTARG}
             ;;
         p)
             prefix=${OPTARG}
+            ;;
+        m)
+            min_tput=${OPTARG}
+            ;;
+        x)
+            max_tput=${OPTARG}
             ;;
         *)
             usage
@@ -163,7 +171,7 @@ while getopts ":r:p:" o; do
 done
 shift $((OPTIND-1))
 
-if [ -z "${rolename}" ] || [ -z "${prefix}" ]; then
+if [ -z "${rolename}" ] || [ -z "${prefix}" ] || [ -z "${min_tput}" ] || [ -z "${max_tput}" ]; then
     usage
 fi
 
@@ -182,7 +190,7 @@ if [[ "${role_arn}" != "false" ]]; then
       echo "FOUND"
     else
       echo -n "CREATING...."
-      if [[ "$(register_scalable_target ${table_name} ${scaleable_read_dimension} ${role_arn})" == "true" ]]; then
+      if [[ "$(register_scalable_target ${table_name} ${scaleable_read_dimension} ${role_arn} ${min_tput} ${max_tput})" == "true" ]]; then
         echo "DONE"
       else
         echo "ERROR"
@@ -194,7 +202,7 @@ if [[ "${role_arn}" != "false" ]]; then
       echo "FOUND"
     else
       echo -n "CREATING..."
-      if [[ "$(register_scalable_target ${table_name} ${scaleable_write_dimension} ${role_arn})" == "true" ]]; then
+      if [[ "$(register_scalable_target ${table_name} ${scaleable_write_dimension} ${role_arn} ${min_tput} ${max_tput})" == "true" ]]; then
         echo "DONE"
       else
         echo "ERROR"
