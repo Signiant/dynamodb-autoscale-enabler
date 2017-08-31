@@ -13,7 +13,9 @@ DynamoDB autoscaling is a bit of a chore to enable or disable if you have a larg
 
 Enables or disables autoscaling on a set of tables.  Usage:
 
-`autoscale-toggle.sh [-m [enable|disable>] [-r <role name>] [-p <table prefix>] [-i <min throughput>] [-x <max throughput>]`
+`autoscale-toggle.sh [-m <enable|disable>] [-r <role name>] [-p <table prefix>] [-i <min throughput>] [-x <max throughput>]`
+
+ex: `autoscale-toggle.sh -m enable -r DynamoDBAutoscaleRole -p MYTABLES -i 5 -x 10000`
 
 Where
 * mode is one of enable or disable.  This enables or disables autoscaling for the tables
