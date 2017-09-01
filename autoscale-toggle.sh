@@ -1,13 +1,10 @@
 #!/usr/local/bin/bash
 
-declare -a table_array
-
 # constants
 scaleable_write_dimension="dynamodb:table:WriteCapacityUnits"
 scaleable_read_dimension="dynamodb:table:ReadCapacityUnits"
 write_metric_type="DynamoDBWriteCapacityUtilization"
 read_metric_type="DynamoDBReadCapacityUtilization"
-
 
 usage()
 {
@@ -41,8 +38,8 @@ list_tables_with_filter()
   table_list_str=$(aws dynamodb list-tables \
                       --query "TableNames[?starts_with(@,\`${prefix}\`) == \`true\`]" \
                       --output text)
-  # This takes the returned data (which is space seperated) and puts it into an array
-  IFS='	' read -r -a table_array <<< "$table_list_str"
+
+  echo ${table_list_str}
 }
 
 scalable_target_exists()
@@ -232,9 +229,9 @@ role_arn=$(role_exists ${rolename})
 if [[ "${role_arn}" != "false" ]]; then
   echo "DynamoDB autoscaling role found OK"
 
-  list_tables_with_filter ${prefix}
+  table_list=$(list_tables_with_filter ${prefix})
 
-  for table_name in "${table_array[@]}"
+  for table_name in $(echo $table_list)
   do
     echo -n "checking for scalable target (read throughput) for ${table_name}..."
     if [[ "$(scalable_target_exists ${table_name} ${scaleable_read_dimension})" == "true" ]]; then
