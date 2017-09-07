@@ -1,8 +1,11 @@
 #!/usr/local/bin/bash
 
 # constants
-scaleable_write_dimension="dynamodb:table:WriteCapacityUnits"
-scaleable_read_dimension="dynamodb:table:ReadCapacityUnits"
+table_scaleable_write_dimension="dynamodb:table:WriteCapacityUnits"
+table_scaleable_read_dimension="dynamodb:table:ReadCapacityUnits"
+index_scaleable_write_dimension="dynamodb:index:WriteCapacityUnits"
+index_scaleable_read_dimension="dynamodb:index:ReadCapacityUnits"
+
 write_metric_type="DynamoDBWriteCapacityUtilization"
 read_metric_type="DynamoDBReadCapacityUtilization"
 
@@ -39,17 +42,29 @@ list_tables_with_filter()
                       --query "TableNames[?starts_with(@,\`${prefix}\`) == \`true\`]" \
                       --output text)
 
-  echo ${table_list_str}
+  echo "${table_list_str}"
+}
+
+get_table_indexes()
+{
+  table_name=$1
+
+  table_index_list=$(aws dynamodb describe-table \
+                        --table-name ${table_name} \
+                        --query "Table.GlobalSecondaryIndexes[*].IndexName" \
+                        --output text)
+
+  echo "${table_index_list}"
 }
 
 scalable_target_exists()
 {
-  table_name=$1
+  resource_id=$1
   scalable_dimension=$2
 
   scalable_target=$(aws application-autoscaling describe-scalable-targets \
                         --service-namespace dynamodb \
-                        --resource-id "table/${table_name}" \
+                        --resource-id "${resource_id}" \
                         --query "ScalableTargets[?contains(ScalableDimension,\`${scalable_dimension}\`) == \`true\`]" \
                         --output text)
 
@@ -62,7 +77,7 @@ scalable_target_exists()
 
 register_scalable_target()
 {
-  table_name=$1
+  resource_id=$1
   scalable_dimension=$2
   role_arn=$3
   min_tput=$4
@@ -70,7 +85,7 @@ register_scalable_target()
 
   aws application-autoscaling register-scalable-target \
     --service-namespace dynamodb \
-    --resource-id "table/${table_name}" \
+    --resource-id "${resource_id}" \
     --scalable-dimension "${scalable_dimension}" \
     --min-capacity ${min_tput} \
     --max-capacity ${max_tput} \
@@ -87,12 +102,12 @@ register_scalable_target()
 
 deregister_scalable_target()
 {
-  table_name=$1
+  resource_id=$1
   scalable_dimension=$2
 
   aws application-autoscaling deregister-scalable-target \
     --service-namespace dynamodb \
-    --resource-id "table/${table_name}" \
+    --resource-id "${resource_id}" \
     --scalable-dimension "${scalable_dimension}"
 
   status=$?
@@ -106,14 +121,14 @@ deregister_scalable_target()
 
 scaling_policy_exists()
 {
-  table_name=$1
+  resource_id=$1
   metric_type=$2
 
-  policy_name=$(get_policy_name $table_name $metric_type)
+  policy_name=$(get_policy_name $resource_id $metric_type)
 
   scaling_policy=$(aws application-autoscaling describe-scaling-policies \
                       --service-namespace dynamodb \
-                      --resource-id "table/${table_name}" \
+                      --resource-id "${resource_id}" \
                       --policy-name "${policy_name}" \
                       --output text)
 
@@ -126,7 +141,7 @@ scaling_policy_exists()
 
 put_scaling_policy()
 {
-  table_name=$1
+  resource_id=$1
   metric_type=$2
   scalable_dimension=$3
 
@@ -135,11 +150,11 @@ scaling_policy=$(cat <<  EOF
 EOF
 )
 
-  policy_name=$(get_policy_name $table_name $metric_type)
+  policy_name=$(get_policy_name $resource_id $metric_type)
 
   aws application-autoscaling put-scaling-policy \
     --service-namespace dynamodb \
-    --resource-id "table/${table_name}" \
+    --resource-id "${resource_id}" \
     --scalable-dimension "${scalable_dimension}" \
     --policy-name "${policy_name}" \
     --policy-type "TargetTrackingScaling" \
@@ -156,7 +171,7 @@ EOF
 
 delete_scaling_policy()
 {
-  table_name=$1
+  resource_id=$1
   metric_type=$2
   scalable_dimension=$3
 
@@ -164,7 +179,7 @@ delete_scaling_policy()
 
   aws application-autoscaling delete-scaling-policy \
     --service-namespace dynamodb \
-    --resource-id "table/${table_name}" \
+    --resource-id "${resource_id}" \
     --scalable-dimension "${scalable_dimension}" \
     --policy-name "${policy_name}"  > /dev/null
 
@@ -179,10 +194,138 @@ delete_scaling_policy()
 
 get_policy_name()
 {
-  table_name=$1
-  policy_type=$2
+  resource_id=$1
+  metric_type=$2
 
-  echo "${policy_type}:table/${table_name}"
+  echo "${metric_type}:${resource_id}"
+}
+
+handle_resource()
+{
+  resource_id=$1
+  resource_type=$2
+  role_arn=$3
+  status="true"
+
+  if [ "${resource_type}" == "table" ]; then
+    read_dimension=${table_scaleable_read_dimension}
+    write_dimension=${table_scaleable_write_dimension}
+  elif [ "${resource_type}" == "index" ]; then
+    read_dimension=${index_scaleable_read_dimension}
+    write_dimension=${index_scaleable_write_dimension}
+  fi
+
+  echo -n "checking for scalable target (read throughput) for ${resource_id}..." 1>&2
+  if [[ "$(scalable_target_exists ${resource_id} ${read_dimension})" == "true" ]]; then
+    if [ "${mode}" == "disable" ]; then
+      echo -n "DISABLING...." 1>&2
+      if [[ "$(deregister_scalable_target ${resource_id} ${read_dimension})" == "true" ]]; then
+        echo "DONE" 1>&2
+      else
+        echo "ERROR" 1>&2
+        status="false"
+      fi
+    else
+      echo "FOUND" 1>&2
+    fi
+  else
+    if [ "${mode}" == "enable" ]; then
+      echo -n "CREATING...." 1>&2
+      if [[ "$(register_scalable_target ${resource_id} ${read_dimension} ${role_arn} ${min_tput} ${max_tput})" == "true" ]]; then
+        echo "DONE" 1>&2
+      else
+        echo "ERROR" 1>&2
+        status="false"
+      fi
+    else
+      echo "NOT FOUND" 1>&2
+    fi
+  fi
+
+  echo -n "checking for scalable target (write throughput) for ${resource_id}..." 1>&2
+  if [[ "$(scalable_target_exists ${resource_id} ${write_dimension})" == "true" ]]; then
+    if [ "${mode}" == "disable" ]; then
+      echo -n "DISABLING...." 1>&2
+      if [[ "$(deregister_scalable_target ${resource_id} ${write_dimension})" == "true" ]]; then
+        echo "DONE" 1>&2
+      else
+        echo "ERROR" 1>&2
+        status="false"
+      fi
+    else
+      echo "FOUND" 1>&2
+    fi
+  else
+    if [ "${mode}" == "enable" ]; then
+      echo -n "CREATING..." 1>&2
+      if [[ "$(register_scalable_target ${resource_id} ${write_dimension} ${role_arn} ${min_tput} ${max_tput})" == "true" ]]; then
+        echo "DONE" 1>&2
+      else
+        echo "ERROR" 1>&2
+        status="false"
+      fi
+    else
+      echo "NOT FOUND" 1>&2
+    fi
+  fi
+
+  # Once we have the scalable targets, we can see if the scaling policies exist
+  echo -n "checking for scaling policy (read throughput) for ${resource_id}..." 1>&2
+  if [[ "$(scaling_policy_exists ${resource_id} ${read_metric_type})" == "true" ]]; then
+    if [ "${mode}" == "disable" ]; then
+      echo -n "DISABLING...." 1>&2
+      if [[ "$(delete_scaling_policy ${resource_id} ${read_metric_type} ${read_dimension})" == "true" ]]; then
+        echo "DONE" 1>&2
+      else
+        echo "ERROR" 1>&2
+        status="false"
+      fi
+    else
+      echo "FOUND" 1>&2
+    fi
+  else
+    if [ "${mode}" == "enable" ]; then
+      echo -n "CREATING..." 1>&2
+      if [[ "$(put_scaling_policy ${resource_id} ${read_metric_type} ${read_dimension})" == "true" ]]; then
+        echo "DONE" 1>&2
+      else
+        echo "ERROR" 1>&2
+        status="false"
+      fi
+    else
+      echo "NOT FOUND" 1>&2
+    fi
+  fi
+
+  # Once we have the scalable targets, we can see if the scaling policies exist
+  echo -n "checking for scaling policy (write throughput) for ${resource_id}..." 1>&2
+  if [[ "$(scaling_policy_exists ${resource_id} ${write_metric_type})" == "true" ]]; then
+    if [ "${mode}" == "disable" ]; then
+      echo -n "DISABLING...." 1>&2
+      if [[ "$(delete_scaling_policy ${resource_id} ${write_metric_type} ${write_dimension})" == "true" ]]; then
+        echo "DONE" 1>&2
+      else
+        echo "ERROR" 1>&2
+        status="false"
+      fi
+    else
+      echo "FOUND" 1>&2
+    fi
+  else
+    if [ "${mode}" == "enable" ]; then
+      echo -n "CREATING..." 1>&2
+      if [[ "$(put_scaling_policy ${resource_id} ${write_metric_type} ${write_dimension})" == "true" ]]; then
+        echo "DONE" 1>&2
+      else
+        echo "ERROR" 1>&2
+        status="false"
+      fi
+    else
+      echo "NOT FOUND" 1>&2
+    fi
+  fi
+
+  echo "${status}"
 }
 
 # ======================
@@ -233,106 +376,27 @@ if [[ "${role_arn}" != "false" ]]; then
 
   for table_name in $(echo $table_list)
   do
-    echo -n "checking for scalable target (read throughput) for ${table_name}..."
-    if [[ "$(scalable_target_exists ${table_name} ${scaleable_read_dimension})" == "true" ]]; then
-      if [ "${mode}" == "disable" ]; then
-        echo -n "DISABLING...."
-        if [[ "$(deregister_scalable_target ${table_name} ${scaleable_read_dimension})" == "true" ]]; then
-          echo "DONE"
-        else
-          echo "ERROR"
-        fi
-      else
-        echo "FOUND"
-      fi
-    else
-      if [ "${mode}" == "enable" ]; then
-        echo -n "CREATING...."
-        if [[ "$(register_scalable_target ${table_name} ${scaleable_read_dimension} ${role_arn} ${min_tput} ${max_tput})" == "true" ]]; then
-          echo "DONE"
-        else
-          echo "ERROR"
-        fi
-      else
-        echo "NOT FOUND"
-      fi
-    fi
+    table_resource_id="table/${table_name}"
 
-    echo -n "checking for scalable target (write throughput) for ${table_name}..."
-    if [[ "$(scalable_target_exists ${table_name} ${scaleable_write_dimension})" == "true" ]]; then
-      if [ "${mode}" == "disable" ]; then
-        echo -n "DISABLING...."
-        if [[ "$(deregister_scalable_target ${table_name} ${scaleable_write_dimension})" == "true" ]]; then
-          echo "DONE"
-        else
-          echo "ERROR"
-        fi
-      else
-        echo "FOUND"
-      fi
-    else
-      if [ "${mode}" == "enable" ]; then
-        echo -n "CREATING..."
-        if [[ "$(register_scalable_target ${table_name} ${scaleable_write_dimension} ${role_arn} ${min_tput} ${max_tput})" == "true" ]]; then
-          echo "DONE"
-        else
-          echo "ERROR"
-        fi
-      else
-        echo "NOT FOUND"
-      fi
-    fi
+    if [[ "$(handle_resource ${table_resource_id} 'table' ${role_arn})" == "true" ]]; then
+      echo "Successfully processed table ${table_name}"
 
-    # Once we have the scalable targets, we can see if the scaling policies exist
-    echo -n "checking for scaling policy (read throughput) for ${table_name}..."
-    if [[ "$(scaling_policy_exists ${table_name} ${read_metric_type})" == "true" ]]; then
-      if [ "${mode}" == "disable" ]; then
-        echo -n "DISABLING...."
-        if [[ "$(delete_scaling_policy ${table_name} ${read_metric_type} ${scaleable_read_dimension})" == "true" ]]; then
-          echo "DONE"
-        else
-          echo "ERROR"
-        fi
-      else
-        echo "FOUND"
-      fi
-    else
-      if [ "${mode}" == "enable" ]; then
-        echo -n "CREATING..."
-        if [[ "$(put_scaling_policy ${table_name} ${read_metric_type} ${scaleable_read_dimension})" == "true" ]]; then
-          echo "DONE"
-        else
-          echo "ERROR"
-        fi
-      else
-        echo "NOT FOUND"
-      fi
-    fi
+      # Does this table have indexes?  If so, we need to enable scaling for each
+      table_indexes=$(get_table_indexes ${table_name})
 
-    # Once we have the scalable targets, we can see if the scaling policies exist
-    echo -n "checking for scaling policy (write throughput) for ${table_name}..."
-    if [[ "$(scaling_policy_exists ${table_name} ${write_metric_type})" == "true" ]]; then
-      if [ "${mode}" == "disable" ]; then
-        echo -n "DISABLING...."
-        if [[ "$(delete_scaling_policy ${table_name} ${write_metric_type} ${scaleable_write_dimension})" == "true" ]]; then
-          echo "DONE"
+      for index_name in $(echo ${table_indexes})
+      do
+        echo "Found index ${index_name} for table ${table_name} - processing"
+        index_resource_id="table/${table_name}/index/${index_name}"
+
+        if [[ "$(handle_resource ${index_resource_id} 'index' ${role_arn})" == "true" ]]; then
+          echo "Successfully processed index ${index_name}"
         else
-          echo "ERROR"
+          echo "Error processing index ${index_name}"
         fi
-      else
-        echo "FOUND"
-      fi
+      done
     else
-      if [ "${mode}" == "enable" ]; then
-        echo -n "CREATING..."
-        if [[ "$(put_scaling_policy ${table_name} ${write_metric_type} ${scaleable_write_dimension})" == "true" ]]; then
-          echo "DONE"
-        else
-          echo "ERROR"
-        fi
-      else
-        echo "NOT FOUND"
-      fi
+      echo "ERROR processing table ${table_name}"
     fi
   done
 else
