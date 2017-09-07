@@ -54,7 +54,11 @@ get_table_indexes()
                         --query "Table.GlobalSecondaryIndexes[*].IndexName" \
                         --output text)
 
-  echo "${table_index_list}"
+  if [ "${table_index_list}" == "None" ]; then
+    echo ""
+  else
+    echo "${table_index_list}"
+  fi
 }
 
 scalable_target_exists()
