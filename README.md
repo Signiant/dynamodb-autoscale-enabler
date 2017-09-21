@@ -1,4 +1,4 @@
-# dynamodb-autoscale-controller
+# dynamodb-autoscale-enabler
 Enables or disables autoscaling on groups of AWS DynamoDB tables
 
 # Purpose
