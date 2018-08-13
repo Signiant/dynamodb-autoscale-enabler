@@ -11,7 +11,7 @@ read_metric_type="DynamoDBReadCapacityUtilization"
 
 usage()
 {
-  echo "Usage: $0 [-m <enable|disable>] [-r <role name>] [-p <table prefix>] [-i <min throughput>] [-x <max throughput>]" 1>&2
+  echo "Usage: $0 [-m <enable|disable>] [-r <role name>] [-p <table prefix>] [-i <min throughput>] [-x <max throughput>] [-u <target utilization percent>]" 1>&2
   exit 1
 }
 
@@ -199,7 +199,7 @@ put_scaling_policy()
   scalable_dimension=$3
 
 scaling_policy=$(cat <<  EOF
-{"PredefinedMetricSpecification":{"PredefinedMetricType": "${metric_type}"},"TargetValue": 50.0}
+{"PredefinedMetricSpecification":{"PredefinedMetricType": "${metric_type}"},"TargetValue": ${target_util} }
 EOF
 )
 
@@ -387,7 +387,7 @@ handle_resource()
 
 check_cli_version
 
-while getopts ":m:r:p:i:x:" o; do
+while getopts ":m:r:p:i:x:u:" o; do
     case "${o}" in
         m)
             mode=${OPTARG}
@@ -404,6 +404,9 @@ while getopts ":m:r:p:i:x:" o; do
         x)
             max_tput=${OPTARG}
             ;;
+        u)
+            target_util=${OPTARG}
+            ;;
         *)
             usage
             ;;
@@ -411,7 +414,7 @@ while getopts ":m:r:p:i:x:" o; do
 done
 shift $((OPTIND-1))
 
-if [ -z "${mode}" ] || [ -z "${rolename}" ] || [ -z "${prefix}" ] || [ -z "${min_tput}" ] || [ -z "${max_tput}" ]; then
+if [ -z "${mode}" ] || [ -z "${rolename}" ] || [ -z "${prefix}" ] || [ -z "${min_tput}" ] || [ -z "${max_tput}" ] || [ -z "${target_util}" ]; then
   usage
 fi
 
