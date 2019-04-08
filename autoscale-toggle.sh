@@ -110,6 +110,22 @@ get_table_indexes()
   fi
 }
 
+table_set_to_provisioned_billing_mode()
+{
+  table_name=$1
+
+  table_billing_mode=$(aws dynamodb describe-table \
+                        --table-name "${table_name}" \
+                        --query "Table.BillingModeSummary.BillingMode" \
+                        --output text)
+
+  if [ "${table_billing_mode}" == "PROVISIONED" ]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
 scalable_target_exists()
 {
   resource_id=$1
@@ -435,6 +451,11 @@ if [[ "${role_arn}" != "false" ]]; then
   for table_name in $(echo $table_list)
   do
     table_resource_id="table/${table_name}"
+
+    if [[ "$(table_set_to_provisioned_billing_mode ${table_name})" == "false" ]]; then
+      echo "Table is set to on-demand capacity - no need to enable autoscaling"
+      exit 0
+    fi
 
     if [[ "$(handle_resource ${table_resource_id} 'table' ${role_arn})" == "true" ]]; then
       echo "Successfully processed table ${table_name}"
